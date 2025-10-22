@@ -342,6 +342,20 @@ docstrange document.pdf --model nanonets --output csv
         help="Clear cached authentication credentials"
     )
     
+    # Web server arguments (only used when first input is "web")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for web server (default: 8000, only used with 'web' command)"
+    )
+    
+    parser.add_argument(
+        "--root-path",
+        default="",
+        help="Root path for web server (e.g., /docstrange, only used with 'web' command)"
+    )
+    
     args = parser.parse_args()
     
     # Handle version flag
@@ -371,32 +385,16 @@ docstrange document.pdf --model nanonets --output csv
         try:
             from .web_app import run_web_app
             
-            # Parse web-specific arguments
-            port = 8000  # default port
-            root_path = ""  # default root path
+            # Get web-specific arguments from parsed args
+            port = args.port
+            root_path = args.root_path
             
-            # Look for --port and --root-path in remaining arguments
-            web_args = args.input[1:]  # Skip 'web' itself
-            i = 0
-            while i < len(web_args):
-                if web_args[i] == "--port" and i + 1 < len(web_args):
-                    try:
-                        port = int(web_args[i + 1])
-                        i += 2
-                    except ValueError:
-                        print(f"❌ Invalid port number: {web_args[i + 1]}", file=sys.stderr)
-                        return 1
-                elif web_args[i] == "--root-path" and i + 1 < len(web_args):
-                    root_path = web_args[i + 1]
-                    # Ensure root path starts with / and doesn't end with /
-                    if root_path and not root_path.startswith('/'):
-                        root_path = '/' + root_path
-                    if root_path.endswith('/'):
-                        root_path = root_path[:-1]
-                    i += 2
-                else:
-                    print(f"❌ Unknown web argument: {web_args[i]}", file=sys.stderr)
-                    return 1
+            # Ensure root path format
+            if root_path:
+                if not root_path.startswith('/'):
+                    root_path = '/' + root_path
+                if root_path.endswith('/'):
+                    root_path = root_path[:-1]
             
             print("Starting DocStrange web interface...")
             base_url = f"http://localhost:{port}{root_path}"
