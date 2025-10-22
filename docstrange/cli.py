@@ -174,7 +174,10 @@ Examples:
   docstrange login --reauth          # Force re-authentication
   
   # Start web interface
-  docstrange web                     # Start web interface at http://localhost:8000
+  docstrange web                          # Start web interface at http://localhost:8000
+  docstrange web --port 8001              # Start web interface on custom port
+  docstrange web --root-path /docstrange  # Start web interface at http://localhost:8000/docstrange
+  docstrange web --port 8001 --root-path /api  # Combine both options
   
   # Convert a PDF to markdown (default cloud mode)
   docstrange document.pdf
@@ -367,10 +370,39 @@ docstrange document.pdf --model nanonets --output csv
     if args.input and args.input[0] == "web":
         try:
             from .web_app import run_web_app
+            
+            # Parse web-specific arguments
+            port = 8000  # default port
+            root_path = ""  # default root path
+            
+            # Look for --port and --root-path in remaining arguments
+            web_args = args.input[1:]  # Skip 'web' itself
+            i = 0
+            while i < len(web_args):
+                if web_args[i] == "--port" and i + 1 < len(web_args):
+                    try:
+                        port = int(web_args[i + 1])
+                        i += 2
+                    except ValueError:
+                        print(f"❌ Invalid port number: {web_args[i + 1]}", file=sys.stderr)
+                        return 1
+                elif web_args[i] == "--root-path" and i + 1 < len(web_args):
+                    root_path = web_args[i + 1]
+                    # Ensure root path starts with / and doesn't end with /
+                    if root_path and not root_path.startswith('/'):
+                        root_path = '/' + root_path
+                    if root_path.endswith('/'):
+                        root_path = root_path[:-1]
+                    i += 2
+                else:
+                    print(f"❌ Unknown web argument: {web_args[i]}", file=sys.stderr)
+                    return 1
+            
             print("Starting DocStrange web interface...")
-            print("Open your browser and go to: http://localhost:8000")
+            base_url = f"http://localhost:{port}{root_path}"
+            print(f"Open your browser and go to: {base_url}")
             print("Press Ctrl+C to stop the server")
-            run_web_app(host='0.0.0.0', port=8000, debug=False)
+            run_web_app(host='0.0.0.0', port=port, root_path=root_path, debug=False)
             return 0
         except ImportError:
             print("❌ Web interface not available. Install Flask: pip install Flask", file=sys.stderr)
