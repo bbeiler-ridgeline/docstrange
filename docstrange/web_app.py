@@ -8,12 +8,166 @@ from typing import Optional
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .extractor import DocumentExtractor
 from .exceptions import ConversionError, UnsupportedFormatError, FileNotFoundError
 
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+def create_app(root_path=''):
+    """Create and configure the Flask application.
+    
+    Args:
+        root_path: Root path for the application (e.g., '/docstrange')
+    
+    Returns:
+        Flask application instance
+    """
+    # Ensure root path format
+    if root_path:
+        if not root_path.startswith('/'):
+            root_path = '/' + root_path
+        if root_path.endswith('/'):
+            root_path = root_path[:-1]
+    
+    # Create app with static and template folder configuration
+    app = Flask(__name__)
+    app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+    
+    # Configure application root if specified
+    if root_path:
+        app.config['APPLICATION_ROOT'] = root_path
+    
+    # Initialize the document extractor
+    extractor = DocumentExtractor()
+    
+    # Define routes
+    @app.route(root_path + '/')
+    def index():
+        """Serve the main page."""
+        return render_template('index.html')
+    
+    @app.route(root_path + '/static/<path:filename>')
+    def static_files(filename):
+        """Serve static files."""
+        return send_from_directory('static', filename)
+    
+    @app.route(root_path + '/api/extract', methods=['POST'])
+    def extract_document():
+        """API endpoint for document extraction."""
+        try:
+            # Check if file was uploaded
+            if 'file' not in request.files:
+                return jsonify({'error': 'No file provided'}), 400
+            
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({'error': 'No file selected'}), 400
+            
+            # Get parameters
+            output_format = request.form.get('output_format', 'markdown')
+            processing_mode = request.form.get('processing_mode', 'cloud')
+            
+            # Create extractor based on processing mode
+            try:
+                extractor_instance = create_extractor_with_mode(processing_mode)
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
+            
+            # Save uploaded file temporarily
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+                file.save(tmp_file.name)
+                tmp_path = tmp_file.name
+            
+            try:
+                # Extract content
+                result = extractor_instance.extract(tmp_path)
+                
+                # Convert to requested format
+                if output_format == 'markdown':
+                    content = result.extract_markdown()
+                elif output_format == 'html':
+                    content = result.extract_html()
+                elif output_format == 'json':
+                    content = result.extract_data()
+                    content = json.dumps(content, indent=2)
+                elif output_format == 'csv':
+                    content = result.extract_csv(include_all_tables=True)
+                elif output_format == 'flat-json':
+                    content = result.extract_data()
+                    content = json.dumps(content, indent=2)
+                elif output_format == 'text':
+                    content = result.extract_text()
+                else:
+                    content = result.extract_markdown()  # Default to markdown
+                
+                # Get metadata
+                metadata = {
+                    'file_type': Path(file.filename).suffix.lower(),
+                    'file_name': file.filename,
+                    'file_size': os.path.getsize(tmp_path),
+                    'pages_processed': getattr(result, 'pages_processed', 1),
+                    'processing_time': getattr(result, 'processing_time', 0),
+                    'output_format': output_format,
+                    'processing_mode': processing_mode
+                }
+                
+                return jsonify({
+                    'success': True,
+                    'content': content,
+                    'metadata': metadata
+                })
+                
+            finally:
+                # Clean up temporary file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                    
+        except RequestEntityTooLarge:
+            return jsonify({'error': 'File too large. Maximum size is 100MB.'}), 413
+        except UnsupportedFormatError as e:
+            return jsonify({'error': f'Unsupported file format: {str(e)}'}), 400
+        except ConversionError as e:
+            return jsonify({'error': f'Conversion error: {str(e)}'}), 500
+        except Exception as e:
+            return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+    
+    @app.route(root_path + '/api/supported-formats')
+    def get_supported_formats():
+        """Get list of supported file formats."""
+        formats = extractor.get_supported_formats()
+        return jsonify({'formats': formats})
+    
+    @app.route(root_path + '/api/health')
+    def health_check():
+        """Health check endpoint."""
+        return jsonify({'status': 'healthy', 'version': '1.0.0'})
+    
+    @app.route(root_path + '/api/system-info')
+    def get_system_info():
+        """Get system information including GPU availability."""
+        gpu_available = check_gpu_availability()
+        
+        # Get additional system info
+        system_info = {
+            'gpu_available': gpu_available,
+            'processing_modes': {
+                'cloud': {
+                    'available': True,
+                    'description': 'Process using cloud API. Fast and requires no local setup.'
+                },
+                'gpu': {
+                    'available': gpu_available,
+                    'description': 'Process locally using GPU. Fastest local processing, requires CUDA.' if gpu_available else 'GPU not available. Install PyTorch with CUDA support.'
+                }
+            }
+        }
+        
+        return jsonify(system_info)
+    
+    return app
+
+# Create default app instance for backwards compatibility
+app = create_app()
 
 def check_gpu_availability():
     """Check if GPU is available for processing."""
@@ -69,134 +223,15 @@ def create_extractor_with_mode(processing_mode):
     else:  # cloud mode (default)
         return DocumentExtractor()
 
-# Initialize the document extractor
-extractor = DocumentExtractor()
-
-@app.route('/')
-def index():
-    """Serve the main page."""
-    return render_template('index.html')
-
-@app.route('/static/<path:filename>')
-def static_files(filename):
-    """Serve static files."""
-    return send_from_directory('static', filename)
-
-@app.route('/api/extract', methods=['POST'])
-def extract_document():
-    """API endpoint for document extraction."""
-    try:
-        # Check if file was uploaded
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file provided'}), 400
-        
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-        
-        # Get parameters
-        output_format = request.form.get('output_format', 'markdown')
-        processing_mode = request.form.get('processing_mode', 'cloud')
-        
-        # Create extractor based on processing mode
-        try:
-            extractor = create_extractor_with_mode(processing_mode)
-        except ValueError as e:
-            return jsonify({'error': str(e)}), 400
-        
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
-            file.save(tmp_file.name)
-            tmp_path = tmp_file.name
-        
-        try:
-            # Extract content
-            result = extractor.extract(tmp_path)
-            
-            # Convert to requested format
-            if output_format == 'markdown':
-                content = result.extract_markdown()
-            elif output_format == 'html':
-                content = result.extract_html()
-            elif output_format == 'json':
-                content = result.extract_data()
-                content = json.dumps(content, indent=2)
-            elif output_format == 'csv':
-                content = result.extract_csv(include_all_tables=True)
-            elif output_format == 'flat-json':
-                content = result.extract_data()
-                content = json.dumps(content, indent=2)
-            elif output_format == 'text':
-                content = result.extract_text()
-            else:
-                content = result.extract_markdown()  # Default to markdown
-            
-            # Get metadata
-            metadata = {
-                'file_type': Path(file.filename).suffix.lower(),
-                'file_name': file.filename,
-                'file_size': os.path.getsize(tmp_path),
-                'pages_processed': getattr(result, 'pages_processed', 1),
-                'processing_time': getattr(result, 'processing_time', 0),
-                'output_format': output_format,
-                'processing_mode': processing_mode
-            }
-            
-            return jsonify({
-                'success': True,
-                'content': content,
-                'metadata': metadata
-            })
-            
-        finally:
-            # Clean up temporary file
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-                
-    except RequestEntityTooLarge:
-        return jsonify({'error': 'File too large. Maximum size is 100MB.'}), 413
-    except UnsupportedFormatError as e:
-        return jsonify({'error': f'Unsupported file format: {str(e)}'}), 400
-    except ConversionError as e:
-        return jsonify({'error': f'Conversion error: {str(e)}'}), 500
-    except Exception as e:
-        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
-
-@app.route('/api/supported-formats')
-def get_supported_formats():
-    """Get list of supported file formats."""
-    formats = extractor.get_supported_formats()
-    return jsonify({'formats': formats})
-
-@app.route('/api/health')
-def health_check():
-    """Health check endpoint."""
-    return jsonify({'status': 'healthy', 'version': '1.0.0'})
-
-@app.route('/api/system-info')
-def get_system_info():
-    """Get system information including GPU availability."""
-    gpu_available = check_gpu_availability()
+def run_web_app(host='0.0.0.0', port=8000, root_path='', debug=False):
+    """Run the web application.
     
-    # Get additional system info
-    system_info = {
-        'gpu_available': gpu_available,
-        'processing_modes': {
-            'cloud': {
-                'available': True,
-                'description': 'Process using cloud API. Fast and requires no local setup.'
-            },
-            'gpu': {
-                'available': gpu_available,
-                'description': 'Process locally using GPU. Fastest local processing, requires CUDA.' if gpu_available else 'GPU not available. Install PyTorch with CUDA support.'
-            }
-        }
-    }
-    
-    return jsonify(system_info)
-
-def run_web_app(host='0.0.0.0', port=8000, debug=False):
-    """Run the web application."""
+    Args:
+        host: Host to bind to (default: '0.0.0.0')
+        port: Port to bind to (default: 8000)
+        root_path: Root path for the application (default: '', can be e.g. '/docstrange')
+        debug: Enable debug mode (default: False)
+    """
     # Check GPU availability before starting the server
     print("🔍 Checking GPU availability...")
     gpu_available = check_gpu_availability()
@@ -218,9 +253,15 @@ def run_web_app(host='0.0.0.0', port=8000, debug=False):
     print("✅ GPU detected - proceeding with model download...")
     print("🔄 Downloading models before starting the web interface...")
     download_models()
-    print(f"✅ Starting docstrange web interface at http://{host}:{port}")
+    
+    # Create the app with the specified root path
+    app_instance = create_app(root_path=root_path)
+    
+    # Print the correct URL
+    base_url = f"http://{host}:{port}{root_path}"
+    print(f"✅ Starting docstrange web interface at {base_url}")
     print("Press Ctrl+C to stop the server")
-    app.run(host=host, port=port, debug=debug)
+    app_instance.run(host=host, port=port, debug=debug)
 
 if __name__ == '__main__':
     run_web_app(debug=True) 

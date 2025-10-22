@@ -174,7 +174,10 @@ Examples:
   docstrange login --reauth          # Force re-authentication
   
   # Start web interface
-  docstrange web                     # Start web interface at http://localhost:8000
+  docstrange web                          # Start web interface at http://localhost:8000
+  docstrange web --port 8001              # Start web interface on custom port
+  docstrange web --root-path /docstrange  # Start web interface at http://localhost:8000/docstrange
+  docstrange web --port 8001 --root-path /api  # Combine both options
   
   # Convert a PDF to markdown (default cloud mode)
   docstrange document.pdf
@@ -339,6 +342,20 @@ docstrange document.pdf --model nanonets --output csv
         help="Clear cached authentication credentials"
     )
     
+    # Web server arguments (only used when first input is "web")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for web server (default: 8000, only used with 'web' command)"
+    )
+    
+    parser.add_argument(
+        "--root-path",
+        default="",
+        help="Root path for web server (e.g., /docstrange, only used with 'web' command)"
+    )
+    
     args = parser.parse_args()
     
     # Handle version flag
@@ -367,10 +384,23 @@ docstrange document.pdf --model nanonets --output csv
     if args.input and args.input[0] == "web":
         try:
             from .web_app import run_web_app
+            
+            # Get web-specific arguments from parsed args
+            port = args.port
+            root_path = args.root_path
+            
+            # Ensure root path format
+            if root_path:
+                if not root_path.startswith('/'):
+                    root_path = '/' + root_path
+                if root_path.endswith('/'):
+                    root_path = root_path[:-1]
+            
             print("Starting DocStrange web interface...")
-            print("Open your browser and go to: http://localhost:8000")
+            base_url = f"http://localhost:{port}{root_path}"
+            print(f"Open your browser and go to: {base_url}")
             print("Press Ctrl+C to stop the server")
-            run_web_app(host='0.0.0.0', port=8000, debug=False)
+            run_web_app(host='0.0.0.0', port=port, root_path=root_path, debug=False)
             return 0
         except ImportError:
             print("❌ Web interface not available. Install Flask: pip install Flask", file=sys.stderr)
